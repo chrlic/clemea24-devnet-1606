@@ -1,0 +1,80 @@
+queries:
+- name: Fabric Faults as Logs
+  resource:
+    name: ACI
+    attributes:
+    - name: aci.fabric.name
+      value: Demo-ACI
+    - name: aci.entity
+      value: Fabric
+    - name: aci.version
+      value: 5.0.1(j)
+  scope:
+    name: aci-scrapper
+    version: 1.0.0
+  rules:
+    # /api/node/class/faultInfo.json?query-target-filter=ne(faultInfo.severity,"cleared")&order-by=faultInfo.created|desc
+    # faultRecord shows all currently shown records -> it repeates each cycle. 
+    # faultInfo shows when the fault occured and last transition so it can be more meaningful
+    query: /api/node/class/faultRecord.json?page=0&page-size=15&order-by=faultRecord.created|desc&time-range=24h
+    select: imdata//faultRecord
+    forEach:
+      emitLogs:
+        - filters:
+          - name: Within Last Collection Interval
+            is: =(jqs("attributes/created").toUnixMillis() + 2 * 60 * 1000) > now().toUnixMillis()
+          - name: Remove duplicates
+            is: =notSeen([jqs("attributes/created"),jqs("attributes/dn"),jqs("attributes/id")])
+          resourceAttributes:
+          - name: aci.sys.log.kind
+            valueFrom: ="fault"
+          - name: aci.sys.log.dn
+            valueFrom: attributes/dn
+          - name: aci.sys.log.affects
+            valueFrom: attributes/affected
+          messageFrom: attributes/descr
+          severityFrom: attributes/severity
+          timestampFrom: attributes/created
+
+- name: Fabric Actions as Logs
+  resource:
+    name: ACI
+    attributes:
+    - name: aci.fabric.name
+      value: Demo-ACI
+    - name: aci.entity
+      value: Fabric
+    - name: aci.version
+      value: 5.0.1(j)
+  scope:
+    name: aci-scrapper
+    version: 1.0.0
+  rules:
+    query: /api/node/class/aaaModLR.json?page=0&page-size=60&order-by=aaaModLR.created|desc&query-target-filter=and(ne(aaaModLR.user, "Cisco_ApicVision"))&time-range=24h&order-by=aaaModLR.created.created|desc
+    select: imdata//aaaModLR
+    forEach:
+      emitLogs:
+        - filters:
+          - name: Within Last Collection Interval
+            is: =(jqs("attributes/created").toUnixMillis() + 2 * 60 * 1000) > now().toUnixMillis()
+          - name: Remove duplicates
+            is: =notSeen([jqs("attributes/created"),jqs("attributes/dn"),jqs("attributes/id")])
+          resourceAttributes:
+          - name: aci.sys.log.kind
+            valueFrom: ="audit"
+          - name: aci.sys.log.dn
+            valueFrom: attributes/dn
+          - name: aci.sys.log.affects
+            valueFrom: attributes/affected
+          - name: aci.sys.log.user
+            valueFrom: attributes/user
+          messageFrom: attributes/descr
+          severityFrom: attributes/severity
+          timestampFrom: attributes/created
+
+
+
+# fault records: /api/node/class/faultRecord.json?page=0&page-size=15&order-by=faultRecord.created|desc&time-range=24h
+# event records: /api/node/class/eventRecord.json?page=0&page-size=15&order-by=eventRecord.created|desc&time-range=24h
+# audit records: /api/node/class/aaaModLR.json?page=2&page-size=15&order-by=aaaModLR.created|desc&query-target-filter=and(ne(aaaModLR.user, "Cisco_ApicVision"))&time-range=24h
+# MUST limit page-size, otherwise APIC get's blocked

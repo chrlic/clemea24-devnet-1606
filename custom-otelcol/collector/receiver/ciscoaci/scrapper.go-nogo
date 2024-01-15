@@ -1,0 +1,624 @@
+package ciscoaci
+
+import (
+	"context"
+	"fmt"
+	"net/http"
+	"runtime/debug"
+	"strconv"
+	"strings"
+	"time"
+
+	"github.com/antchfx/jsonquery"
+	contextdb "github.com/chrlic/otelcol-cust/collector/shared/contextdb"
+	expr "github.com/chrlic/otelcol-cust/collector/shared/expressions"
+	"go.opentelemetry.io/collector/component"
+	"go.opentelemetry.io/collector/consumer"
+	"go.opentelemetry.io/collector/pdata/plog"
+	"go.opentelemetry.io/collector/pdata/pmetric"
+	"go.uber.org/zap"
+)
+
+type aciScrapper struct {
+	logger         *zap.Logger
+	config         component.Config
+	metricConsumer consumer.Metrics
+	logConsumer    consumer.Logs
+	ctx            context.Context
+	httpClient     *http.Client
+	emitter        emitter
+	db             contextdb.ContextDb
+	expr           *expr.ExpressionEnvironment
+}
+
+func newAciScrapper(receiver *aciReceiver) aciScrapper {
+
+	logger := receiver.logger
+	metricConsumer := receiver.metricConsumer
+	logConsumer := receiver.logConsumer
+	cfg := receiver.config
+	ctx := receiver.ctx
+
+	aciClient, err := getAciClient(cfg, logger)
+	if err != nil {
+		logger.Error("Cannot create ACI Http Client:", zap.Error(err))
+	}
+
+	expr := expr.ExpressionEnvironment{
+		Logger: logger,
+	}
+	expr.InitEnv()
+
+	return aciScrapper{
+		logger:         logger,
+		metricConsumer: metricConsumer,
+		logConsumer:    logConsumer,
+		config:         cfg,
+		ctx:            ctx,
+		httpClient:     aciClient,
+		expr:           &expr,
+	}
+}
+
+func (g *aciScrapper) run() {
+	cfg := g.config.(*Config)
+
+	g.logger.Info("Starting scrapper...\n")
+	g.logger.Info("Config: ", zap.Any("config", g.config))
+
+	/*
+		err := contextdb.Test(g.logger)
+		if err != nil {
+			g.logger.Sugar().Errorf("DB Error: %v", err)
+		}
+
+		return
+	*/
+	g.emitter = emitter{
+		logger: g.logger,
+	}
+	g.emitter.init(
+		func(metricBundle pmetric.Metrics) {
+			g.metricConsumer.ConsumeMetrics(g.ctx, metricBundle)
+		},
+		func(logsBundle plog.Logs) {
+			g.logConsumer.ConsumeLogs(g.ctx, logsBundle)
+		})
+
+	ticker := time.NewTicker(time.Duration(cfg.Interval) * time.Second)
+	quit := make(chan struct{})
+	go func() {
+		err := g.scrapeAci()
+		if err != nil {
+			g.logger.Error("Error scrapping ACI: ", zap.Error(err))
+		}
+		for {
+			select {
+			case <-ticker.C:
+				go func() {
+					err := g.scrapeAci()
+					if err != nil {
+						g.logger.Error("Error scrapping ACI: ", zap.Error(err))
+					}
+				}()
+			case <-quit:
+				ticker.Stop()
+				return
+			}
+		}
+	}()
+}
+
+func (g *aciScrapper) scrapeAci() error {
+
+	defer func() {
+		if r := recover(); r != nil {
+			g.logger.Sugar().Errorf("***** Recovered in scrapeAci: %v\n%s\n", r, string(debug.Stack()))
+		}
+	}()
+
+	cfg := g.config.(*Config)
+
+	err := g.login()
+	if err != nil {
+		g.logger.Sugar().Infof("Not logged in - %v", err)
+		return err
+	}
+
+	for _, q := range cfg.Queries {
+		g.scrapeOneQuery(q)
+	}
+	g.logout()
+
+	return nil
+}
+
+func (g *aciScrapper) scrapeOneQuery(query *AciQuery) error {
+	cfg := g.config.(*Config)
+
+	resource := cfg.Resource
+	if query.Resource != nil {
+		resource = query.Resource
+	}
+	scope := cfg.Scope
+	if query.Scope != nil {
+		scope = query.Scope
+	}
+
+	scrapeContext := aciScrapeContext{
+		docStack:       []*jsonquery.Node{},
+		rsrcAttrsStack: []map[string]string{},
+	}
+
+	// memory leak prevention
+	defer func() {
+		for i := range scrapeContext.docStack {
+			scrapeContext.docStack[i] = nil
+		}
+	}()
+
+	err := g.runRule(&query.Rules, &scrapeContext, resource, scope)
+	// err := g.scrapeOneQuery(q)
+	if err != nil {
+		g.logger.Sugar().Errorf("Error scrapping query %s - %v", query.Name, err)
+	}
+
+	return nil
+
+}
+
+func (g *aciScrapper) runRule(rule *AciRule, scrapeContext *aciScrapeContext, resource *AciResource, scope *AciScope) error {
+	parentDoc, err := scrapeContext.topDoc()
+	if err == nil {
+		scrapeContext.paramsMap = g.getParamsMap(rule.QueryParams, parentDoc, scrapeContext)
+	}
+	g.logger.Sugar().Debugf("Processing rule: %v\n doc: %v", rule, parentDoc)
+
+	if rule.Query != "" {
+		g.logger.Sugar().Debugf("Query %s Params map %v", rule.Query, scrapeContext.paramsMap)
+
+		url, err := g.fillParams(rule.Query, scrapeContext.paramsMap)
+		if err != nil {
+			g.logger.Sugar().Errorf("Cannot form query %s - invalid params %v - %v", rule.Query, scrapeContext.paramsMap, err)
+			return err
+		}
+		g.logger.Sugar().Debugf("Query URL %s", url)
+
+		response, err := g.aciGet(url)
+		if err != nil {
+			g.logger.Sugar().Error("Cannot query ACI for %s - %v", url, err)
+		}
+
+		doc, err := jsonquery.Parse(strings.NewReader(response))
+		if err != nil {
+			g.logger.Sugar().Error("Cannot parse ACI response for %s: %s - %v", url, response, err)
+		}
+
+		if rule.Select != "" && rule.ForEach != nil {
+			g.logger.Sugar().Debugf("Going into ForEach - Select %s ForEach: %v", rule.Select, rule.ForEach)
+
+			list := jsonquery.Find(doc, rule.Select)
+			g.logger.Sugar().Debugf("Selected length %d\n%v", len(list), list)
+
+			for _, subDoc := range list {
+				scrapeContext.pushDoc(subDoc)
+				err = g.runRule(rule.ForEach, scrapeContext, resource, scope)
+				if err != nil {
+					g.logger.Sugar().Errorf("Rule processing failed %v: %v - %v", rule.ForEach, scrapeContext, err)
+				}
+				scrapeContext.popDoc()
+			}
+		}
+		rsrcAttrs := map[string]any{}
+		for _, a := range rule.ResourceAttributes {
+			// valPtr := jsonquery.FindOne(doc, a.ValueFrom)
+			valueAny, err := g.evaluateValueFrom(doc, a.ValueFrom, map[string]any{}, rsrcAttrs, scrapeContext.paramsMap)
+			if err != nil {
+				return fmt.Errorf("Cannot evaluate expr %s - %v", a.ValueFrom, err)
+			}
+			// g.logger.Sugar().Infof("EVALUATED: %T - %v", valueAny, valueAny)
+			rsrcAttrs[a.Name] = valueAny
+		}
+
+		if g.metricConsumer != nil { // This is a metric receiver
+			for _, e := range rule.Emit {
+				// valPtr := jsonquery.FindOne(doc, e.ValueFrom)
+				// valueAny := fmt.Sprintf("%s", valPtr.Value())
+				valueAny, err := g.evaluateValueFrom(doc, e.ValueFrom, map[string]any{}, map[string]any{}, scrapeContext.paramsMap)
+				if err != nil {
+					return fmt.Errorf("Cannot evaluate expr %s - %v", e.ValueFrom, err)
+				}
+				value, err := strconv.ParseFloat(valueAny.(string), 64)
+				if err != nil {
+					return fmt.Errorf("Value in query %s, value from %s = %s is not number - %v", url, e.ValueFrom, valueAny, err)
+				}
+				attrs := map[string]any{}
+				for _, a := range e.Attributes {
+					// valPtr := jsonquery.FindOne(doc, a.ValueFrom)
+					valueAny, err := g.evaluateValueFrom(doc, a.ValueFrom, attrs, rsrcAttrs, scrapeContext.paramsMap)
+					if err != nil {
+						return fmt.Errorf("Cannot evaluate expr %s - %v", a.ValueFrom, err)
+					}
+					attrs[a.Name] = valueAny
+				}
+				cfg := g.config.(*Config)
+				g.emitter.emitMetrics(&e, value, attrs, rsrcAttrs, resource, scope, cfg.Interval)
+			}
+		}
+		if g.logConsumer != nil { // This is a log receiver
+			for _, e := range rule.EmitLogs {
+				// TODO big time here
+				rsrcAttrs := map[string]any{}
+				attrs := map[string]any{}
+				message := ""
+				aciSeverity := ""
+				timestamp := ""
+				// logType := e.LogType
+				for _, a := range e.ResourceAttributes {
+					// valPtr := jsonquery.FindOne(doc, a.ValueFrom)
+					valueAny, err := g.evaluateValueFrom(doc, a.ValueFrom, attrs, rsrcAttrs, scrapeContext.paramsMap)
+					if err != nil {
+						return fmt.Errorf("Cannot evaluate expr %s - %v", a.ValueFrom, err)
+					}
+					// g.logger.Sugar().Infof("EVALUATED: %T - %v", valueAny, valueAny)
+					rsrcAttrs[a.Name] = valueAny
+				}
+				for _, a := range e.Attributes {
+					// valPtr := jsonquery.FindOne(doc, a.ValueFrom)
+					valueAny, err := g.evaluateValueFrom(doc, a.ValueFrom, attrs, rsrcAttrs, scrapeContext.paramsMap)
+					if err != nil {
+						return fmt.Errorf("Cannot evaluate expr %s - %v", a.ValueFrom, err)
+					}
+					// g.logger.Sugar().Infof("EVALUATED: %T - %v", valueAny, valueAny)
+					attrs[a.Name] = valueAny
+				}
+				filtersPassed := true
+				for _, f := range e.Filters {
+					isValueAny, err := g.evaluateValueFrom(doc, f.Is, attrs, rsrcAttrs, scrapeContext.paramsMap)
+					if err != nil {
+						return fmt.Errorf("Cannot evaluate expr %s - %v", f.Is, err)
+					}
+					isValue, ok := isValueAny.(bool)
+					if !ok {
+						return fmt.Errorf("Expression evaluated not to bool value %v", isValueAny)
+					}
+					g.logger.Sugar().Debugf("Filter expression %s evaluated as %t", f.Is, isValue)
+					filtersPassed = filtersPassed && isValue
+					if !filtersPassed {
+						break
+					}
+				}
+				if !filtersPassed {
+					continue
+				}
+				if e.MessageFrom != "" {
+					messageAny, err := g.evaluateValueFrom(doc, e.MessageFrom, attrs, rsrcAttrs, scrapeContext.paramsMap)
+					if err != nil {
+						return fmt.Errorf("Cannot evaluate expr %s - %v", e.MessageFrom, err)
+					}
+					message = fmt.Sprintf("%v", messageAny)
+				}
+				if e.SeverityFrom != "" {
+					aciSeverityAny, err := g.evaluateValueFrom(doc, e.SeverityFrom, attrs, rsrcAttrs, scrapeContext.paramsMap)
+					if err != nil {
+						return fmt.Errorf("Cannot evaluate expr %s - %v", e.MessageFrom, err)
+					}
+					aciSeverity = fmt.Sprintf("%v", aciSeverityAny)
+				}
+				if e.TimestampFrom != "" {
+					timestampAny, err := g.evaluateValueFrom(doc, e.TimestampFrom, attrs, rsrcAttrs, scrapeContext.paramsMap)
+					if err != nil {
+						return fmt.Errorf("Cannot evaluate expr %s - %v", e.TimestampFrom, err)
+					}
+					timestamp = fmt.Sprintf("%v", timestampAny)
+				}
+
+				cfg := g.config.(*Config)
+				g.emitter.emitLogs(message, aciSeverity, timestamp, attrs, rsrcAttrs, resource, scope, cfg.Interval)
+			}
+		}
+	} else { // no Query on this level, check Emit related to parent level
+		rsrcAttrs := map[string]any{}
+		for _, a := range rule.ResourceAttributes {
+			// valPtr := jsonquery.FindOne(parentDoc, a.ValueFrom)
+			valueAny, err := g.evaluateValueFrom(parentDoc, a.ValueFrom, map[string]any{}, rsrcAttrs, scrapeContext.paramsMap)
+			if err != nil {
+				return fmt.Errorf("Cannot evaluate expr %s - %v", a.ValueFrom, err)
+			}
+			// g.logger.Sugar().Infof("EVALUATED: %T - %v", valueAny, valueAny)
+			rsrcAttrs[a.Name] = valueAny
+		}
+		if g.metricConsumer != nil { // This is a metric receiver
+			for _, e := range rule.Emit {
+				// valPtr := jsonquery.FindOne(parentDoc, e.ValueFrom)
+				// valueStr := fmt.Sprintf("%s", valPtr.Value())
+				valueStr, err := g.evaluateValueFrom(parentDoc, e.ValueFrom, map[string]any{}, map[string]any{}, scrapeContext.paramsMap)
+				if err != nil {
+					return fmt.Errorf("Cannot evaluate expr %s - %v", e.ValueFrom, err)
+				}
+				value, err := strconv.ParseFloat(valueStr.(string), 64)
+				if err != nil {
+					return fmt.Errorf("Value in query %s, value from %s = %s is not number - %v", "upper - not known", e.ValueFrom, valueStr, err)
+				}
+				attrs := map[string]any{}
+				for _, a := range e.Attributes {
+					// valPtr := jsonquery.FindOne(parentDoc, a.ValueFrom)
+					valueAny, err := g.evaluateValueFrom(parentDoc, a.ValueFrom, attrs, rsrcAttrs, scrapeContext.paramsMap)
+					if err != nil {
+						return fmt.Errorf("Cannot evaluate expr %s - %v", a.ValueFrom, err)
+					}
+					attrs[a.Name] = valueAny
+				}
+				cfg := g.config.(*Config)
+				g.emitter.emitMetrics(&e, value, attrs, rsrcAttrs, resource, scope, cfg.Interval)
+			}
+		}
+		if g.logConsumer != nil { // This is a log receiver
+			for _, e := range rule.EmitLogs {
+				// TODO big time here
+				rsrcAttrs := map[string]any{}
+				attrs := map[string]any{}
+				message := ""
+				aciSeverity := ""
+				timestamp := ""
+				// logType := e.LogType
+				for _, a := range e.ResourceAttributes {
+					// valPtr := jsonquery.FindOne(doc, a.ValueFrom)
+					valueAny, err := g.evaluateValueFrom(parentDoc, a.ValueFrom, map[string]any{}, rsrcAttrs, scrapeContext.paramsMap)
+					if err != nil {
+						return fmt.Errorf("Cannot evaluate expr %s - %v", a.ValueFrom, err)
+					}
+					// g.logger.Sugar().Infof("EVALUATED: %T - %v", valueAny, valueAny)
+					rsrcAttrs[a.Name] = valueAny
+				}
+				for _, a := range e.Attributes {
+					// valPtr := jsonquery.FindOne(doc, a.ValueFrom)
+					valueAny, err := g.evaluateValueFrom(parentDoc, a.ValueFrom, attrs, rsrcAttrs, scrapeContext.paramsMap)
+					if err != nil {
+						return fmt.Errorf("Cannot evaluate expr %s - %v", a.ValueFrom, err)
+					}
+					// g.logger.Sugar().Infof("EVALUATED: %T - %v", valueAny, valueAny)
+					attrs[a.Name] = valueAny
+				}
+				filtersPassed := true
+				for _, f := range e.Filters {
+					isValueAny, err := g.evaluateValueFrom(parentDoc, f.Is, attrs, rsrcAttrs, scrapeContext.paramsMap)
+					if err != nil {
+						return fmt.Errorf("Cannot evaluate expr %s - %v", f.Is, err)
+					}
+					isValue, ok := isValueAny.(bool)
+					if !ok {
+						return fmt.Errorf("Expression evaluated not to bool value %v", isValueAny)
+					}
+					g.logger.Sugar().Debugf("Filter expression %s evaluated as %t", f.Is, isValue)
+					filtersPassed = filtersPassed && isValue
+					if !filtersPassed {
+						break
+					}
+				}
+				if !filtersPassed {
+					continue
+				}
+				if e.MessageFrom != "" {
+					messageAny, err := g.evaluateValueFrom(parentDoc, e.MessageFrom, attrs, rsrcAttrs, scrapeContext.paramsMap)
+					if err != nil {
+						return fmt.Errorf("Cannot evaluate expr %s - %v", e.MessageFrom, err)
+					}
+					message = fmt.Sprintf("%v", messageAny)
+				}
+				if e.SeverityFrom != "" {
+					aciSeverityAny, err := g.evaluateValueFrom(parentDoc, e.SeverityFrom, attrs, rsrcAttrs, scrapeContext.paramsMap)
+					if err != nil {
+						return fmt.Errorf("Cannot evaluate expr %s - %v", e.SeverityFrom, err)
+					}
+					aciSeverity = fmt.Sprintf("%v", aciSeverityAny)
+				}
+				if e.TimestampFrom != "" {
+					timestampAny, err := g.evaluateValueFrom(parentDoc, e.TimestampFrom, attrs, rsrcAttrs, scrapeContext.paramsMap)
+					if err != nil {
+						return fmt.Errorf("Cannot evaluate expr %s - %v", e.TimestampFrom, err)
+					}
+					timestamp = fmt.Sprintf("%v", timestampAny)
+				}
+				cfg := g.config.(*Config)
+				g.emitter.emitLogs(message, aciSeverity, timestamp, attrs, rsrcAttrs, resource, scope, cfg.Interval)
+			}
+		}
+	}
+
+	return nil
+
+}
+
+// helpers for attributes and expressions
+
+func (g *aciScrapper) getAttributesMap(attrs []AciAttribute, parentDoc *jsonquery.Node, dpAttrs map[string]any, rsrcAttrs map[string]any, scrapeContext *aciScrapeContext) map[string]any {
+	// TODO
+	attrsMap := map[string]any{}
+	for _, attr := range attrs {
+		valueAny, err := g.evaluateValueFrom(parentDoc, attr.ValueFrom, dpAttrs, rsrcAttrs, scrapeContext.paramsMap)
+		if err != nil {
+			g.logger.Sugar().Errorf("Cannot evaluate expr %s - %v", attr.ValueFrom, err)
+		}
+		attrsMap[attr.Name] = valueAny
+	}
+	return attrsMap
+}
+
+func (g *aciScrapper) fillParams(templ string, paramsMap map[string]string) (string, error) {
+
+	result := ""
+	inParam := false
+	paramName := ""
+	for i := 0; i < len(templ); i++ {
+		switch templ[i] {
+		case '{':
+			inParam = true
+		case '}':
+			inParam = false
+			value, ok := paramsMap[paramName]
+			if !ok {
+				return "", fmt.Errorf("Missing variable %s for template %s", paramName, templ)
+			}
+			result += value
+			paramName = ""
+		case '\\':
+			i++
+			result += string(templ[i])
+		default:
+			if inParam {
+				paramName += string(templ[i])
+			} else {
+				result += string(templ[i])
+			}
+		}
+	}
+	return result, nil
+}
+
+func (g *aciScrapper) getParamsMap(params []AciAttribute, doc *jsonquery.Node, scrapperContext *aciScrapeContext) map[string]string {
+	// g.logger.Sugar().Debugf("Attributes %v", attrs)
+
+	attrMap := map[string]string{}
+	for name, value := range scrapperContext.paramsMap {
+		attrMap[name] = value
+	}
+	for _, attr := range params {
+		attrMap[attr.Name] = g.evalAttribute(&attr, doc, scrapperContext)
+	}
+	return attrMap
+}
+
+func (g *aciScrapper) evalAttribute(attr *AciAttribute, doc *jsonquery.Node, scrapperContext *aciScrapeContext) string {
+	g.logger.Sugar().Debugf("Attribute %v doc %v", attr, doc)
+	if attr.ValueFrom != "" && doc != nil {
+		valueNode := jsonquery.FindOne(doc, attr.ValueFrom)
+		if valueNode == nil {
+			g.logger.Sugar().Errorf("Attribute %v returns null value")
+			return ""
+		} else {
+			return fmt.Sprintf("%v", valueNode.Value())
+		}
+	} else if attr.Value != "" {
+		return attr.Value
+	} else {
+		return ""
+	}
+}
+
+// scrapeContext related struct/logic
+
+type aciScrapeContext struct {
+	emitter        emitter
+	resource       *AciResource
+	scope          *AciScope
+	docStack       []*jsonquery.Node
+	rsrcAttrsStack []map[string]string
+	paramsMap      map[string]string
+}
+
+func (ctx *aciScrapeContext) pushDoc(doc *jsonquery.Node) {
+	ctx.docStack = append(ctx.docStack, doc)
+}
+
+func (ctx *aciScrapeContext) popDoc() (*jsonquery.Node, error) {
+	length := len(ctx.docStack)
+	if length > 0 {
+		doc := ctx.docStack[length-1]
+		ctx.docStack = ctx.docStack[:length-1]
+		return doc, nil
+	} else {
+		return nil, fmt.Errorf("Trying to pop empty doc stack")
+	}
+}
+
+func (ctx *aciScrapeContext) getDoc(i int) (*jsonquery.Node, error) {
+	length := len(ctx.docStack)
+	if length > i {
+		return ctx.docStack[i], nil
+	} else {
+		return nil, fmt.Errorf("Trying to get doc %d while having only %d elements", i, length)
+	}
+}
+
+func (ctx *aciScrapeContext) topDoc() (*jsonquery.Node, error) {
+	length := len(ctx.docStack)
+	if length > 0 {
+		return ctx.docStack[length-1], nil
+	} else {
+		return nil, fmt.Errorf("Trying to get doc but stack empty")
+	}
+}
+
+func (ctx *aciScrapeContext) pushRsrcAttrs(attrs map[string]string) {
+	ctx.rsrcAttrsStack = append(ctx.rsrcAttrsStack, attrs)
+}
+
+func (ctx *aciScrapeContext) popRsrcAttrs() (map[string]string, error) {
+	length := len(ctx.rsrcAttrsStack)
+	if length > 0 {
+		attrs := ctx.rsrcAttrsStack[length-1]
+		ctx.rsrcAttrsStack = ctx.rsrcAttrsStack[:length-1]
+		return attrs, nil
+	} else {
+		return nil, fmt.Errorf("Trying to pop empty doc stack")
+	}
+}
+
+func (ctx *aciScrapeContext) getRsrcAttrs(i int) (map[string]string, error) {
+	length := len(ctx.rsrcAttrsStack)
+	if length > i {
+		return ctx.rsrcAttrsStack[i], nil
+	} else {
+		return nil, fmt.Errorf("Trying to get doc %d while having only %d elements", i, length)
+	}
+}
+
+func (ctx *aciScrapeContext) topRsrcAttrs() (map[string]string, error) {
+	length := len(ctx.rsrcAttrsStack)
+	if length > 0 {
+		return ctx.rsrcAttrsStack[length-1], nil
+	} else {
+		return nil, fmt.Errorf("Trying to get doc but stack empty")
+	}
+}
+
+func (ctx *aciScrapeContext) allRsrcAttrs() map[string]string {
+	allAttrs := map[string]string{}
+	for i := 0; i < len(ctx.rsrcAttrsStack); i++ {
+		for name, value := range ctx.rsrcAttrsStack[i] {
+			allAttrs[name] = value
+		}
+	}
+	return allAttrs
+}
+
+func (g *aciScrapper) evaluateValueFrom(doc *jsonquery.Node, expr string, attrs map[string]any, resAttrs map[string]any, params map[string]string) (any, error) {
+
+	defer func() {
+		if r := recover(); r != nil {
+			g.logger.Sugar().Errorf("Recovered from fatal error %v", r)
+		}
+	}()
+
+	var value any
+	var err error
+	switch expr[0] {
+	case '=':
+		bindings := map[string]interface{}{
+			"attr":    attrs,
+			"resAttr": resAttrs,
+			"params":  params,
+		}
+		value, err = g.expr.EvaluateExpressionWithJqDoc(doc, expr[1:], bindings)
+		if err != nil {
+			return "", err
+		}
+		// g.logger.Sugar().Infof("VALUATE RESULT: %v - %T", value, value)
+	default:
+		valRef := jsonquery.FindOne(doc, expr)
+		value = fmt.Sprintf("%s", valRef.Value())
+	}
+
+	return value, err
+}

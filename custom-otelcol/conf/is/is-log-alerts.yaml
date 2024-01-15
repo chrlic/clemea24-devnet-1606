@@ -1,0 +1,34 @@
+queries:
+- name: Intersight Server Health
+  resource:
+    name: Intersight
+    attributes:
+    - name: is.fabric.name
+      value: PRG-DC
+    - name: is.entity
+      value: Server
+  scope:
+    name: intersight-scrapper
+    version: 1.0.0
+  rules:
+    query: /api/v1/view/Servers?&$skip=0
+    select: /Results/*
+    forEach:
+      query: LOOP_ITEM
+      resourceAttributes:
+      - name: is.server.dn
+        valueFrom: Dn
+      select: CondAlarm/*
+      forEach:
+        emitLogs:
+          - filters:
+            - name: Within Last Collection Interval
+              is: =(jqs("LastTransitionTime").toUnixMillis() + 2 * 60 * 1000) > now().toUnixMillis()
+            - name: Remove duplicates
+              is: =notSeen([jqs("Moid")])
+            resourceAttributes:
+            - name: is.server.log.type
+              valueFrom: ="fault"
+            messageFrom: Description
+            severityFrom: Severity
+            timestampFrom: LastTransitionTime

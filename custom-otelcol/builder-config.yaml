@@ -1,0 +1,42 @@
+dist:
+  name: custom-otelcol    # Name of the resulting collector binary
+  description: Custom OpenTelemetry Collector for Cisco Intersight and Cisco ACI 
+  output_path: ./build
+  otelcol_version: 0.91.0 # Should match the version of OCB tool
+  version: 0.91.0         # Arbitrary version of the build collector
+
+exporters:
+  - gomod:
+      go.opentelemetry.io/collector/exporter/loggingexporter v0.91.0
+  - gomod:
+      github.com/chrlic/otelcol-cust/collector/exporter/appdynamics v0.1.1
+    path: collector/exporter/appdynamics
+  - gomod:
+      go.opentelemetry.io/collector/exporter/otlpexporter v0.91.0
+  - gomod:
+      github.com/open-telemetry/opentelemetry-collector-contrib/exporter/prometheusremotewriteexporter v0.91.0
+  - gomod:
+      github.com/open-telemetry/opentelemetry-collector-contrib/exporter/lokiexporter v0.91.0
+
+extensions:
+  - gomod:
+      github.com/open-telemetry/opentelemetry-collector-contrib/extension/basicauthextension v0.91.0
+
+receivers:
+  - gomod:
+      go.opentelemetry.io/collector/receiver/otlpreceiver v0.91.0
+  - gomod:
+      github.com/chrlic/otelcol-cust/collector/receiver/ciscoaci v0.1.1
+    path: collector/receiver/ciscoaci
+  - gomod:
+      github.com/chrlic/otelcol-cust/collector/receiver/ciscointersight v0.1.1
+    path: collector/receiver/ciscointersight
+
+# relative paths are related to dist/output_path -> ../<path-from-project-root>
+replaces:
+  - github.com/chrlic/otelcol-cust/collector/shared/contextdb => ../collector/shared/contextdb
+  - github.com/chrlic/otelcol-cust/collector/shared/expressions => ../collector/shared/expressions
+  - github.com/chrlic/otelcol-cust/collector/shared/jsonscraper => ../collector/shared/jsonscraper
+
+excludes:
+  - github.com/knadh/koanf v1.5.0

@@ -1,0 +1,7 @@
+type: ciscoaci
+
+status:
+  class: receiver
+  stability:
+    beta: [metrics, logs]
+  distributions: [contrib]

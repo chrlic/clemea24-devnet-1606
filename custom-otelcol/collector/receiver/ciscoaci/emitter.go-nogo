@@ -1,0 +1,149 @@
+package ciscoaci
+
+import (
+	"fmt"
+	"time"
+
+	"go.opentelemetry.io/collector/pdata/pcommon"
+	"go.opentelemetry.io/collector/pdata/plog"
+	"go.opentelemetry.io/collector/pdata/pmetric"
+	"go.uber.org/zap"
+)
+
+type emitter struct {
+	resource        *AciResource
+	scope           *AciScope
+	metricFlushFunc func(bundle pmetric.Metrics)
+	logFlushFunc    func(bundle plog.Logs)
+	metrics         pmetric.Metrics
+	scopeMetrics    pmetric.ScopeMetrics
+	counter         int
+	logger          *zap.Logger
+}
+
+const (
+	MAX_METRICS_PER_FLUSH = 1
+)
+
+func (e *emitter) init(metricFlushFunc func(bundle pmetric.Metrics), logFlushFunc func(bundle plog.Logs)) {
+	e.metricFlushFunc = metricFlushFunc
+	e.logFlushFunc = logFlushFunc
+}
+
+func (e *emitter) emitMetrics(metric *AciEmit, value float64, attrs map[string]any, rsrcAttrs map[string]any, resource *AciResource, scope *AciScope, interval int) {
+	metrics := pmetric.NewMetrics()
+	resourceMetrics := metrics.ResourceMetrics().AppendEmpty()
+	resAttrs := resourceMetrics.Resource().Attributes()
+
+	for _, ra := range resource.Attributes {
+		e.upsertAttribute(&resAttrs, ra.Name, ra.Value)
+	}
+	for n, v := range rsrcAttrs {
+		e.upsertAttribute(&resAttrs, n, v)
+	}
+
+	scopeMetrics := resourceMetrics.ScopeMetrics().AppendEmpty()
+	scopeMetrics.Scope().SetName(scope.Name)
+	scopeMetrics.Scope().SetVersion(scope.Version)
+
+	scopeMetric := scopeMetrics.Metrics().AppendEmpty()
+
+	scopeMetric.SetName(metric.Name)
+	scopeMetric.SetDescription(metric.Description)
+	scopeMetric.SetUnit(metric.Unit)
+
+	var dp pmetric.NumberDataPoint
+
+	switch metric.Type {
+	case Sum:
+		scopeMetric.SetEmptySum()
+		scopeMetric.Sum().SetIsMonotonic(true)
+		scopeMetric.Sum().SetAggregationTemporality(pmetric.AggregationTemporalityCumulative)
+
+		dp = scopeMetric.Sum().DataPoints().AppendEmpty()
+	case Gauge:
+		scopeMetric.SetEmptyGauge()
+		dp = scopeMetric.Gauge().DataPoints().AppendEmpty()
+	}
+
+	now := time.Now()
+	startTime := now.Add(-time.Duration(interval))
+	dp.SetStartTimestamp(pcommon.NewTimestampFromTime(startTime))
+	dp.SetTimestamp(pcommon.NewTimestampFromTime(now))
+
+	dp.SetDoubleValue(value)
+	for n, v := range attrs {
+		dpAttributes := dp.Attributes()
+		e.upsertAttribute(&dpAttributes, n, v)
+	}
+
+	e.metricFlushFunc(metrics)
+}
+
+func (e *emitter) upsertAttribute(attributeMap *pcommon.Map, attrName string, attrValue any) {
+
+	switch attrValue.(type) {
+	case []string:
+		inSlice := attrValue.([]string)
+		attrSlice := attributeMap.PutEmptySlice(attrName)
+		for _, elem := range inSlice {
+			attrSlice.AppendEmpty().SetStr(elem)
+		}
+	case string:
+		attributeMap.PutStr(attrName, attrValue.(string))
+	default:
+		attributeMap.PutStr(attrName, fmt.Sprintf("%T-toStr-%v", attrValue, attrValue))
+	}
+}
+
+func (e *emitter) emitLogs(message string, aciSeverity string, timestamp string, attrs map[string]any, rsrcAttrs map[string]any, resource *AciResource, scope *AciScope, interval int) {
+	out := plog.NewLogs()
+	rls := out.ResourceLogs().AppendEmpty()
+	for attrName, attrValue := range rsrcAttrs {
+		e.logger.Sugar().Debugf("Setting rsrc attr... %s -> %v", attrName, attrValue)
+		rls.Resource().Attributes().PutStr(attrName, fmt.Sprintf("%v", attrValue))
+	}
+	logSlice := rls.ScopeLogs().AppendEmpty().LogRecords()
+	logRecord := logSlice.AppendEmpty()
+	for attrName, attrValue := range attrs {
+		logRecord.Attributes().PutStr(attrName, fmt.Sprintf("%v", attrValue))
+	}
+	logRecord.Body().SetStr(message)
+	now := time.Now()
+
+	// timestamp format: 2023-05-30T15:16:26.896+02:00
+	aciTimestapm, err := time.Parse(time.RFC3339, timestamp)
+	if err != nil {
+		e.logger.Sugar().Errorf("Cannot parse dat string %s", timestamp)
+		aciTimestapm = now
+	}
+
+	logRecord.SetTimestamp(pcommon.NewTimestampFromTime(aciTimestapm))
+	logRecord.SetObservedTimestamp(pcommon.NewTimestampFromTime(now))
+	severity := aciToOtelSeverity(aciSeverity)
+	logRecord.SetSeverityNumber(severity)
+	logRecord.SetSeverityText(aciSeverity)
+
+	e.logger.Sugar().Debugf("Flushing logs... %v", out)
+	e.logFlushFunc(out)
+}
+
+func aciToOtelSeverity(aciSeverity string) plog.SeverityNumber {
+	otelSeverity := plog.SeverityNumberInfo
+
+	switch aciSeverity {
+	case "info":
+		otelSeverity = plog.SeverityNumberInfo
+	case "warning":
+		otelSeverity = plog.SeverityNumberWarn
+	case "minor":
+		otelSeverity = plog.SeverityNumberError
+	case "major":
+		otelSeverity = plog.SeverityNumberError2
+	case "critical":
+		otelSeverity = plog.SeverityNumberFatal
+	default:
+		otelSeverity = plog.SeverityNumberInfo
+	}
+	return otelSeverity
+}

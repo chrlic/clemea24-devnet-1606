@@ -1,0 +1,23 @@
+schemas:
+- name: appd
+  indexes:
+  - name: application
+    multiValue: false
+    fields: ["/application"]
+  - name: ip
+    multiValue: true
+    fields: ["/ipv4"]
+  - name: id
+    multiValue: false
+    unique: true
+    fields: ["/application","/tier","/node"]
+- name: k8s-pods
+  indexes:
+  - name: "id"
+    multiValue: false
+    unique: true
+    fields: ["/podName"]
+  - name: node-ip
+    fields: ["/nodeIP"]
+  - name: pod-ip
+    fields: ["/ipv4"]

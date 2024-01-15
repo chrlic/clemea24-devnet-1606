@@ -1,0 +1,65 @@
+queries:
+- name: Fabric Health Metrics
+  resource:
+    name: ACI
+    attributes:
+    - name: aci.fabric.name
+      value: Demo-ACI
+    - name: aci.entity
+      value: Fabric
+    - name: aci.version
+      value: 5.0.1(j)
+  scope:
+    name: aci-scrapper
+    version: 1.0.0
+  rules:
+    query: /api/node/mo/topology/HDfabricOverallHealth5min-0.json
+    emitMetric:
+    - name: health
+      unit: percent
+      type: gauge # sum/gauge
+      # monotonic: true
+      # temporality: cumulative # cumulative/delta
+      valueFrom: =jqs("imdata//fabricOverallHealthHist5min/attributes/healthMin")
+      resourceAttributes:
+- name: Fabric Faults Metrics
+  resource:
+    name: ACI
+    attributes:
+    - name: aci.fabric.name
+      value: Demo-ACI
+    - name: aci.entity
+      value: Fabric
+    - name: aci.version
+      value: 5.0.1(j)
+  scope:
+    name: aci-scrapper
+    version: 1.0.0
+  rules:
+    query: /api/class/faultCountsWithDetails.json
+    resourceAttributes:
+    emitMetric:
+    - name: faults.warning
+      unit: count
+      type: gauge # sum/gauge
+      # monotonic: true
+      # temporality: cumulative # cumulative/delta
+      valueFrom: =jqs("imdata//faultCountsWithDetails/attributes/warn")
+    - name: faults.minor
+      unit: count
+      type: gauge # sum/gauge
+      # monotonic: true
+      # temporality: cumulative # cumulative/delta
+      valueFrom: =jqs("imdata//faultCountsWithDetails/attributes/minor")
+    - name: faults.major
+      unit: count
+      type: gauge # sum/gauge
+      # monotonic: true
+      # temporality: cumulative # cumulative/delta
+      valueFrom: =jqs("imdata//faultCountsWithDetails/attributes/maj")
+    - name: faults.critical
+      unit: count
+      type: gauge # sum/gauge
+      # monotonic: true
+      # temporality: cumulative # cumulative/delta
+      valueFrom: =jqs("imdata//faultCountsWithDetails/attributes/crit")

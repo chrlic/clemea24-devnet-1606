@@ -1,0 +1,129 @@
+queries:
+- name: Intersight Server Health Normal
+  resource:
+    name: Intersight
+    attributes:
+    - name: is.fabric.name
+      value: PRG-DC
+    - name: is.entity
+      value: Server
+  scope:
+    name: intersight-scrapper
+    version: 1.0.0
+  rules:
+    query: /api/v1/compute/PhysicalSummaries?$count=true&$filter=((AlarmSummary.Critical%20eq%200)%20and%20(AlarmSummary.Warning%20eq%200))
+    emitMetric:
+    - name: status.normal
+      unit: count
+      type: gauge # sum/gauge
+      # monotonic: true
+      # temporality: cumulative # cumulative/delta
+      valueFrom: /Count
+      resourceAttributes:
+- name: Intersight Server Health Critical
+  resource:
+    name: Intersight
+    attributes:
+    - name: is.fabric.name
+      value: PRG-DC
+    - name: is.entity
+      value: Server
+  scope:
+    name: intersight-scrapper
+    version: 1.0.0
+  rules:
+    query: /api/v1/compute/PhysicalSummaries?$count=true&$filter=(AlarmSummary.Critical%20gt%200)
+    emitMetric:
+    - name: status.critical
+      unit: count
+      type: gauge # sum/gauge
+      # monotonic: true
+      # temporality: cumulative # cumulative/delta
+      valueFrom: /Count
+      resourceAttributes:
+- name: Intersight Server Health Warning
+  resource:
+    name: Intersight
+    attributes:
+    - name: is.fabric.name
+      value: PRG-DC
+    - name: is.entity
+      value: Server
+  scope:
+    name: intersight-scrapper
+    version: 1.0.0
+  rules:
+    query: /api/v1/compute/PhysicalSummaries?$count=true&$filter=((AlarmSummary.Critical%20eq%200)%20and%20(AlarmSummary.Warning%20gt%200))
+    emitMetric:
+    - name: status.warning
+      unit: count
+      type: gauge # sum/gauge
+      # monotonic: true
+      # temporality: cumulative # cumulative/delta
+      valueFrom: /Count
+      resourceAttributes:
+
+
+- name: Intersight FI Health Normal
+  resource:
+    name: Intersight
+    attributes:
+    - name: is.fabric.name
+      value: PRG-DC
+    - name: is.entity
+      value: FabricInterconnect
+  scope:
+    name: intersight-scrapper
+    version: 1.0.0
+  rules:
+    query: /api/v1/network/ElementSummaries?$filter=((tolower(AlarmSummary.Critical)%20eq%200)%20and%20(tolower(AlarmSummary.Warning)%20eq%200))%20and%20SwitchType%20eq%20FabricInterconnect&$count=true
+    emitMetric:
+    - name: status.normal
+      unit: count
+      type: gauge # sum/gauge
+      # monotonic: true
+      # temporality: cumulative # cumulative/delta
+      valueFrom: /Count
+      resourceAttributes:
+- name: Intersight FI Health Critical
+  resource:
+    name: Intersight
+    attributes:
+    - name: is.fabric.name
+      value: PRG-DC
+    - name: is.entity
+      value: FabricInterconnect
+  scope:
+    name: intersight-scrapper
+    version: 1.0.0
+  rules:
+    query: /api/v1/network/ElementSummaries?$filter=((tolower(AlarmSummary.Critical)%20gt%200))%20and%20SwitchType%20eq%20FabricInterconnect&$count=true
+    emitMetric:
+    - name: status.critical
+      unit: count
+      type: gauge # sum/gauge
+      # monotonic: true
+      # temporality: cumulative # cumulative/delta
+      valueFrom: /Count
+      resourceAttributes:
+- name: Intersight FI Health Warning
+  resource:
+    name: Intersight
+    attributes:
+    - name: is.fabric.name
+      value: PRG-DC
+    - name: is.entity
+      value: FabricInterconnect
+  scope:
+    name: intersight-scrapper
+    version: 1.0.0
+  rules:
+    query: /api/v1/network/ElementSummaries?$filter=((tolower(AlarmSummary.Warning)%20gt%200)%20and%20(tolower(AlarmSummary.Critical)%20eq%200))%20and%20SwitchType%20eq%20FabricInterconnect&$count=true
+    emitMetric:
+    - name: status.warning
+      unit: count
+      type: gauge # sum/gauge
+      # monotonic: true
+      # temporality: cumulative # cumulative/delta
+      valueFrom: /Count
+      resourceAttributes:

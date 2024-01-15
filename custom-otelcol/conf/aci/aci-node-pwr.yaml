@@ -1,0 +1,58 @@
+queries:
+- name: Node Power and Temperature
+  resource:
+    name: ACI
+    attributes:
+    - name: aci.fabric.name
+      value: Demo-ACI
+    - name: aci.entity
+      value: Node
+    - name: aci.version
+      value: 5.0.1(j)
+  scope:
+    name: aci-scrapper
+    version: 1.0.0
+  rules:
+    query: /api/class/fabricNode.json
+    select: imdata//fabricNode
+    forEach:
+      queryParameters:
+      - name: nodeDn
+        valueFrom: attributes/dn
+      - name: nodeName
+        valueFrom: attributes/name
+      query: /api/node/mo/${nodeDn}/sys/ch.json?query-target=subtree&target-subtree-class=eqptPsu
+      select: imdata//eqptPsu
+      reducers: [powerSupplied, powerDrawn]
+      forEach:
+        queryParameters:
+        - name: psuDn
+          valueFrom: attributes/dn
+        query: /api/node/mo/${psuDn}/HDeqptPsPower5min-0.json
+        select: imdata//eqptPsPowerHist5min
+        forEach:
+          reducerMaps:
+          - name: powerSupplied
+            valueFrom: =double(jqs("attributes/suppliedAvg"))
+          - name: powerDrawn
+            valueFrom: =double(jqs("attributes/drawnAvg"))
+      resourceAttributes:
+      - name: aci.node.dn
+        valueFrom: =params["nodeDn"]
+      - name: aci.node.name
+        valueFrom: =params["nodeName"]
+      - name: aci.node.podDn
+        valueFrom: =params["nodeDn"].split("/").merge([0,1], "/")
+      emitMetric:
+      - name: aci.node.power.supplied
+        unit: W
+        type: gauge # sum/gauge
+        # monotonic: true
+        # temporality: cumulative # cumulative/delta
+        valueFrom: =reducerMap("powerSupplied").sumReducer()
+      - name: power.drawn
+        unit: W
+        type: gauge # sum/gauge
+        # monotonic: true
+        # temporality: cumulative # cumulative/delta
+        valueFrom: =reducerMap("powerDrawn").sumReducer()

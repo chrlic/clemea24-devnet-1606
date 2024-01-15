@@ -1,0 +1,88 @@
+receivers:
+  otlp:
+    protocols:
+      grpc:
+      http:
+  ciscoaci/metrics:
+    interval: 60
+    aci:
+      host: "$ACI_HOST"
+      port: 443
+      protocol: https
+      user: "$ACI_USERNAME"
+      password: "$ACI_PASSWORD"
+      socks5: "localhost:1080"
+    queries:
+    - conf/aci/aci-sys-hf.yaml
+    - conf/aci/aci-node-pwr.yaml
+  ciscoaci/logs:
+    interval: 60
+    aci:
+      host: "$ACI_HOST"
+      port: 443
+      protocol: https
+      user: "$ACI_USERNAME"
+      password: "$ACI_PASSWORD"
+      socks5: "localhost:1080"
+    queries:
+    - conf/aci/aci-sys-logs.yaml
+  ciscointersight/metrics:
+    intersight:
+      apiKeyId: $INTERSIGHT_API_KEY_ID
+      apiKeyFile: conf/intersightPrivateKey.txt
+    queryFiles:
+    - conf/is/is-metric-server-health.yaml
+    - conf/is/is-metric-ts-db-power.yaml
+    interval: 60
+  ciscointersight/logs:
+    intersight:
+      apiKeyId: $INTERSIGHT_API_KEY_ID
+      apiKeyFile: conf/intersightPrivateKey.txt
+    queryFiles:
+    - conf/is/is-log-alerts.yaml
+    interval: 60
+
+processors:
+
+extensions:
+  basicauth/metrics:
+    client_auth:
+      username: "$GRAFANA_CLOUD_USER_ID_METRICS"
+      password: "$GRAFANA_CLOUD_TOKEN"
+  basicauth/logs:
+    client_auth:
+      username: "$GRAFANA_CLOUD_USER_ID_LOGS"
+      password: "$GRAFANA_CLOUD_TOKEN"   
+
+exporters:
+  logging:
+    verbosity: detailed
+  appdynamics:
+    analytics:
+      url: "$APPD_ANALYTICS_ENDPOINT"
+      globalAccountName: "$APPD_GLOBAL_ACCOUNT_NAME"
+      apiKey: "$APPD_ANALYTICS_API_KEY"
+      metricsTable: mdotelmetrics
+      logsTable: mdotellogs
+      initTable: false
+  prometheusremotewrite/grafana:
+    endpoint: $GRAFANA_CLOUD_URL_METRICS
+    auth:
+      authenticator: basicauth/metrics
+  loki/grafana:
+    endpoint: $GRAFANA_CLOUD_URL_LOGS
+    auth:
+      authenticator: basicauth/logs
+
+service:
+  extensions: [basicauth/metrics, basicauth/logs]
+  pipelines:
+    metrics:
+      receivers: [ciscointersight/metrics, ciscoaci/metrics]
+      exporters: [logging, prometheusremotewrite/grafana]
+    logs:
+      receivers: [ciscointersight/logs, ciscoaci/logs]
+      exporters: [logging, loki/grafana]
+  telemetry:
+    logs:
+      level: debug

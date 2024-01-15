@@ -1,0 +1,54 @@
+queries:
+- name: Intersight TS Data - Energy Consumed
+  resource:
+    name: Intersight
+    attributes:
+    - name: is.fabric.name
+      value: PRG-DC
+    - name: is.entity
+      value: Server
+  scope:
+    name: intersight-scrapper
+    version: 1.0.0
+  rules:
+    query: /api/v1/telemetry/TimeSeries
+    queryParameters:
+    - name: timeFrom
+      valueFrom: =(now().toUnixMillis()-5*60*1000).fromUnixMillis()
+    - name: timeTo
+      valueFrom: =(now().toUnixMillis()-0*60*1000).fromUnixMillis()
+    queryPostData: |
+      {
+        "aggregations":
+        [
+          { 
+            "fieldName":"sumEnergyConsumed",
+            "type":"doubleSum",
+            "name":"energyConsumed",
+            "fieldNames":["sumEnergyConsumed"]
+          }
+        ],
+        "dimensions":["dn"],
+        "filter":
+          {
+            "fields":[{"type":"selector","dimension":"deviceId","value":"5f9167f36f72612d31801c64"}],
+            "type":"or"
+          },
+          "intervals":["${timeFrom}/${timeTo}"],
+          "dataSource":"psu_stat",
+          "granularity":{"type":"period","timezone":"UTC","period":"PT1M"},
+          "postAggregations":[],
+          "queryType":"groupBy"
+        }
+    select: '*'
+    forEach:
+      emitMetric:
+      - name: is.entity.psu.consumption
+        unit: W/h
+        type: gauge # sum/gauge
+        # monotonic: true
+        # temporality: cumulative # cumulative/delta
+        valueFrom: event/energyConsumed
+        resourceAttributes:
+        - name: is.entity.dn
+          valueFrom: event/dn
