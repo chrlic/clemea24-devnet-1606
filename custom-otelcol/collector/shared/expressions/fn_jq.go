@@ -19,9 +19,14 @@ func (c *ExpressionEnvironment) jqFunctions() []cel.EnvOption {
 	functions := []cel.EnvOption{}
 
 	var jqsFunctionImpl = cel.FunctionBinding(func(args ...ref.Val) ref.Val {
-		expr := args[0].Value().(string)
-		// c.Logger.Sugar().Debugf("DOC GET NULL: %t", c.JqDoc == nil)
-		// c.Logger.Sugar().Debugf("DOC %v", c.JqDoc.OutputXML())
+		expr, ok := args[0].Value().(string)
+		if !ok {
+			return types.NewErr("invalid operand of type '%v' - a string", args[0].Type())
+		}
+		if c.JqDoc == nil {
+			return types.NewErr("jsonquery doc is null")
+		}
+
 		valPtr := jsonquery.FindOne(c.JqDoc, expr)
 		if valPtr == nil {
 			return types.String("")
@@ -31,9 +36,14 @@ func (c *ExpressionEnvironment) jqFunctions() []cel.EnvOption {
 	})
 
 	var jqasFunctionImpl = cel.FunctionBinding(func(args ...ref.Val) ref.Val {
-		expr := args[0].Value().(string)
-		// c.Logger.Sugar().Debugf("DOC GET NULL: %t", c.JqDoc == nil)
-		// c.Logger.Sugar().Debugf("DOC %s %v", expr, c)
+		expr, ok := args[0].Value().(string)
+		if !ok {
+			return types.NewErr("invalid operand of type '%v' - a string", args[0].Type())
+		}
+		if c.JqDoc == nil {
+			return types.NewErr("jsonquery doc is null")
+		}
+
 		sliceValue := []string{}
 		valSlicePtr := jsonquery.Find(c.JqDoc, expr)
 		for _, valPtr := range valSlicePtr {

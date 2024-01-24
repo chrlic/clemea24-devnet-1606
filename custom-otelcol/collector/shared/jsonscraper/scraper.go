@@ -148,9 +148,9 @@ func (g *Scraper) runRuleNew(rule *Rule, doc *jsonquery.Node, scContext *scraper
 	var err error
 
 	// evaluate parameters from current doc
-	if doc != nil { // nil is with initial call before any query
-		g.evaluateParameters(rule.QueryParameters, doc, scContext)
-	}
+	//if doc != nil { // nil is with initial call before any query
+	g.evaluateParameters(rule.QueryParameters, doc, scContext)
+	//}
 
 	switch rule.Query {
 	case "":

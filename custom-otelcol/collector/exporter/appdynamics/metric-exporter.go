@@ -10,6 +10,7 @@ import (
 	"net/http"
 	"runtime/debug"
 	"sort"
+	"strconv"
 	"strings"
 	"sync"
 	"time"
@@ -181,7 +182,10 @@ func (e *metricsExporter) pushMetricsData(ctx context.Context, md pmetric.Metric
 					scope := resourceMetrics.ScopeMetrics().At(j).Scope()
 					metricRecords = append(metricRecords, e.appdMetricRecords(&resource, &scope, &metric)...)
 				case pmetric.MetricTypeHistogram:
-					return fmt.Errorf("Unsupported metric of type MetricTypeHistogram")
+					resource := resourceMetrics.Resource()
+					scope := resourceMetrics.ScopeMetrics().At(j).Scope()
+					metricRecords = append(metricRecords, e.appdHistogramMetricRecords(&resource, &scope, &metric)...)
+					// return fmt.Errorf("Unsupported metric of type MetricTypeHistogram")
 				case pmetric.MetricTypeExponentialHistogram:
 					return fmt.Errorf("Unsupported metric of type MetricTypeExponentialHistogram")
 				case pmetric.MetricTypeSummary:
@@ -216,10 +220,10 @@ func (e *metricsExporter) appdMetricRecords(resource *pcommon.Resource, scope *p
 	switch metric.Type() {
 	case pmetric.MetricTypeGauge:
 		dataPoints = metric.Gauge().DataPoints()
-		e.logger.Debug("DP: ", zap.Any("dp len", dataPoints.Len()), zap.Any("dpp", metric.Gauge().DataPoints().At(0)))
+		// e.logger.Debug("DP: ", zap.Any("dp len", dataPoints.Len()), zap.Any("dpp", metric.Gauge().DataPoints().At(0)))
 	case pmetric.MetricTypeSum:
 		dataPoints = metric.Sum().DataPoints()
-		e.logger.Debug("DP: ", zap.Any("dp len", dataPoints.Len()), zap.Any("dpp", metric.Sum().DataPoints().At(0)))
+		// e.logger.Debug("DP: ", zap.Any("dp len", dataPoints.Len()), zap.Any("dpp", metric.Sum().DataPoints().At(0)))
 	default:
 		return metricRecords
 	}
@@ -291,6 +295,107 @@ func (e *metricsExporter) appdMetricRecords(resource *pcommon.Resource, scope *p
 		}
 	}
 
+	return metricRecords
+}
+
+func (e *metricsExporter) appdHistogramMetricRecords(resource *pcommon.Resource, scope *pcommon.InstrumentationScope, metric *pmetric.Metric) analyticsRecords {
+	metricRecords := analyticsRecords{}
+
+	var dataPoints pmetric.HistogramDataPointSlice
+	switch metric.Type() {
+	case pmetric.MetricTypeHistogram:
+		dataPoints = metric.Histogram().DataPoints()
+		// e.logger.Debug("DP: ", zap.Any("dp len", dataPoints.Len()), zap.Any("dpp", metric.Histogram().DataPoints().At(0)))
+	case pmetric.MetricTypeExponentialHistogram:
+		// dataPoints = metric.ExponentialHistogram().DataPoints()
+		// e.logger.Debug("DP: ", zap.Any("dp len", dataPoints.Len()), zap.Any("dpp", metric.ExponentialHistogram().DataPoints().At(0)))
+	default:
+		return metricRecords
+	}
+
+	for i := 0; i < dataPoints.Len(); i++ {
+		dp := dataPoints.At(i)
+
+		buckets := dp.BucketCounts()
+		bounds := dp.ExplicitBounds()
+
+		// padding of bounds from left by spaces to make the bucket names sortable
+		boundMaxLen := len(strconv.FormatFloat(bounds.At(bounds.Len()-1), 'f', -1, 64))
+		lowFormatString := fmt.Sprintf("(-inf,%% %ds]", boundMaxLen)
+		midFormatString := fmt.Sprintf("(%% %ds,%% %ds]", boundMaxLen, boundMaxLen)
+		highFormatString := fmt.Sprintf("(%% %ds,+inf)", boundMaxLen)
+
+		for bckt := 0; bckt < buckets.Len(); bckt++ {
+			metricRecord := analyticsRecord{}
+			bucketName := ""
+			if bckt == 0 {
+				bucketName = fmt.Sprintf(lowFormatString, strconv.FormatFloat(bounds.At(bckt), 'f', -1, 64))
+			} else if bckt == buckets.Len()-1 {
+				bucketName = fmt.Sprintf(highFormatString, strconv.FormatFloat(bounds.At(bckt-1), 'f', -1, 64))
+			} else {
+				bucketName = fmt.Sprintf(midFormatString, strconv.FormatFloat(bounds.At(bckt-1), 'f', -1, 64), strconv.FormatFloat(bounds.At(bckt), 'f', -1, 64))
+			}
+			metricRecord["bucket"] = bucketName
+			bucketValue := buckets.At(bckt)
+
+			// copy resource attributes
+			for name, value := range resource.Attributes().AsRaw() {
+				nName := normalizedName(name)
+				metricRecord[RESOURCE_PREFIX+nName] = fmt.Sprintf("%s", value)
+			}
+			if scope.Name() != "" {
+				metricRecord[SCOPE_PREFIX+"name"] = scope.Name()
+			}
+			if scope.Version() != "" {
+				metricRecord[SCOPE_PREFIX+"version"] = scope.Version()
+			}
+			metricRecord["metricName"] = metric.Name()
+			metricRecord["metricUnit"] = metric.Unit()
+			metricRecord["metricType"] = metric.Type().String()
+			metricRecord["metricStartTimestamp"] = dp.StartTimestamp().AsTime().UnixMilli()
+			metricRecord["metricTimestamp"] = dp.Timestamp().AsTime().UnixMilli()
+
+			metricRecord["metricValue"] = bucketValue
+			dpAttributes := dp.Attributes().AsRaw()
+			for name, value := range dpAttributes {
+				nName := normalizedName(name)
+				metricRecord[LABEL_PREFIX+nName] = fmt.Sprintf("%s", value)
+			}
+			if metric.Histogram().AggregationTemporality() == pmetric.AggregationTemporalityCumulative {
+				cacheKey := getCacheKey(resource.Attributes().AsRaw(), metric.Name())
+				cacheKey = getCacheKey(dp.Attributes().AsRaw(), cacheKey)
+				metricCacheMutex.Lock()
+				if cacheValue, ok := metricCache[cacheKey]; ok {
+					if cacheUpdate, hasRecord := metricCacheUpdates[cacheKey]; hasRecord {
+						if time.Now().Compare(cacheUpdate.Add(90*time.Second)) > 0 {
+							// missed reporting interval - skip this one and start from scratch
+							metricCache[cacheKey] = float64(bucketValue)
+							metricCacheUpdates[cacheKey] = time.Now()
+						} else {
+							value := float64(bucketValue) - cacheValue
+							metricCache[cacheKey] = float64(bucketValue)
+							metricCacheUpdates[cacheKey] = time.Now()
+							metricRecord["metricValue"] = value
+							// Histogram bucket, Cummulative -> difference over interval
+							metricRecords = append(metricRecords, metricRecord)
+						}
+					} else {
+						// cache-update-miss -> new entry + skip this reporting interval
+						metricCache[cacheKey] = float64(bucketValue)
+						metricCacheUpdates[cacheKey] = time.Now()
+					}
+				} else {
+					// cache-miss -> new entry + skip this reporting interval
+					metricCache[cacheKey] = float64(bucketValue)
+					metricCacheUpdates[cacheKey] = time.Now()
+				}
+				metricCacheMutex.Unlock()
+			} else {
+				// Histogram bucket, Delta -> direct metric value
+				metricRecords = append(metricRecords, metricRecord)
+			}
+		}
+	}
 	return metricRecords
 }
 

@@ -1,0 +1,11 @@
+go 1.19
+
+use (
+	./collector/exporter/appdynamics
+	./collector/receiver/ciscoaci
+	./collector/receiver/ciscointersight
+	./collector/shared/contextdb
+	./collector/shared/expressions
+	./collector/shared/jsonscraper
+	./build
+)

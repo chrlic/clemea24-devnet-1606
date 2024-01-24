@@ -120,7 +120,7 @@ func (s *IntersightClient) intersightGet(uri string) (string, error) {
 
 func (s *IntersightClient) intersightPost(uri string, payload *string) (string, error) {
 
-	s.logger.Debug("Intersight POST request", zap.Any("URI", uri))
+	s.logger.Debug("Intersight POST request", zap.Any("URI", uri), zap.Any("payload", *payload))
 
 	response, err := s.ApiClient.DoPost(
 		*s.AuthCtx,
