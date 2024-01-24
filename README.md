@@ -191,11 +191,11 @@ Select **Page Load** test from the second row of buttons
 
 Fill in the form like this: (you can choose another website to monitor)
 
-![lab2 TE acct](/assets/lab2-te-test-main.png){width=400px}
+![lab2 TE acct](/assets/lab2-te-test-main.png)
 
 Select agents like this:
 
-![lab2 TE acct](/assets/lab2-te-test-agts.png){width=400px}
+![lab2 TE acct](/assets/lab2-te-test-agts.png)
 
 Click **Create New Test** button
 
@@ -551,7 +551,7 @@ Here, Json processing block is added by clicking **+ Operations** button. Then t
 
 Experiment with different log visualizations in the **Logs** section of the widget configuration options on the right hand side!
 
-![Lab3 log display options](assets/lab3-log-options.png){width=300px}
+![Lab3 log display options](assets/lab3-log-options.png)
 
 This concludes Lab 3 - congratulation, if you made it so far! 
 
