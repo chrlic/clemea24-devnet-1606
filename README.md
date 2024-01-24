@@ -68,6 +68,8 @@ exporters:
     endpoint: <GRAFANA PROMETHEUS ENDPOINT URL>
     auth:
       authenticator: basicauth/metrics
+    resource_to_telemetry_conversion:
+      enabled: true      
   loki/grafana:
     endpoint: <GRAFANA LOKI ENDPOINT URL>
     auth:
@@ -534,3 +536,23 @@ service:
       level: debug
 ~~~
 
+Start the collector and check in the logs, that data is being collected and sent to Grafana Cloud.
+
+In Grafana, visualize the metrics in similar way as you have done for OS metrics and ThousandEyes. Configuration files in the `conf` directory specify metric names and attributes which are then available for metric selection in Grafana. For logs, Use Logs widget in Grafana like this:
+
+In Query, use **logs** datasource from the dropdown menu similar to this:
+![Lab3 log datasource](assets/lab3-log-datasource.png.png)
+
+All logs are received in structured JSON format, so to select the right logs for your context, you need to parse the JSON and filter the desired data, like this:
+
+![Lab3 log selection](assets/lab3-log-selection.png)
+
+Here, Json processing block is added by clicking **+ Operations** button. Then there are 2 variables created, entity and body. Entity is assigned a value of OpenTelemetry resource attribute `aci.entity` - see the collector configuration file for others - and body is assigned to the text of the log message. Then, filters can be set to use those variables, like here we filer out only those log messages having `aci.entity` resource attribute set by the collector to `Fabric`.
+
+Experiment with different log visualizations in the **Logs** section of the widget configuration options on the right hand side!
+
+![Lab3 log display options](assets/lab3-log-options.png)
+
+This concludes Lab 3 - congratulation, if you made it so far! 
+
+We certainly hope you enjoyed it and learned something useful, if not outright exciting. Let us know what you think in the **Discussions** or **Issues** of this Github project!

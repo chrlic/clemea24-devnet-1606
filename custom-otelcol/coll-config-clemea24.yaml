@@ -33,6 +33,7 @@ receivers:
     queryFiles:
     - conf/is/is-metric-server-health.yaml
     - conf/is/is-metric-ts-db-power.yaml
+    - conf/is/is-metric-vm-power-state.yaml
     interval: 60
   ciscointersight/logs:
     intersight:
@@ -69,6 +70,8 @@ exporters:
     endpoint: $GRAFANA_CLOUD_URL_METRICS
     auth:
       authenticator: basicauth/metrics
+    resource_to_telemetry_conversion:
+      enabled: true
   loki/grafana:
     endpoint: $GRAFANA_CLOUD_URL_LOGS
     auth:
