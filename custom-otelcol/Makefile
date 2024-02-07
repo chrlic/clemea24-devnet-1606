@@ -1,11 +1,14 @@
 SHELL = /bin/bash
 
+.PHONY: all
+all: build run
+
 .PHONY: build
 build:
 	builder --config=builder-config.yaml
 
 .PHONY: run
-run: build
+run: 
 	./build/custom-otelcol --config=config.yaml
 
 .PHONY: test
