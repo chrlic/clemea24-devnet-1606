@@ -33,7 +33,6 @@ receivers:
     queryFiles:
     - conf/is/is-metric-server-health.yaml
     - conf/is/is-metric-ts-db-power.yaml
-    - conf/is/is-metric-vm-power-state.yaml
     interval: 60
   ciscointersight/logs:
     intersight:
