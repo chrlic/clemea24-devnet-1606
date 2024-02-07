@@ -8,12 +8,6 @@ import (
 	"go.opentelemetry.io/collector/component"
 )
 
-type IntersightConfig struct {
-	Host       string `mapstructure:"host"`
-	ApiKeyId   string `mapstructure:"apiKeyId"`
-	ApiKeyFile string `mapstructure:"apiKeyFile"`
-}
-
 type ContextProvider struct {
 	Name          string                `mapstructure:"name"`
 	Subscriptions []ContextSubscription `mapstructure:"subscriptions"`
@@ -22,6 +16,12 @@ type ContextProvider struct {
 type ContextSubscription struct {
 	Topic string `mapstructure:"topic"`
 	Table string `mapstructure:"table"`
+}
+
+type IntersightConfig struct {
+	Host       string `mapstructure:"host"`
+	ApiKeyId   string `mapstructure:"apiKeyId"`
+	ApiKeyFile string `mapstructure:"apiKeyFile"`
 }
 
 // Config - represents the receivers' configuration in config.yaml file of the collector

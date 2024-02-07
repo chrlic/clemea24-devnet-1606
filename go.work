@@ -1,0 +1,11 @@
+go 1.19
+
+use (
+	./custom-otelcol/collector/exporter/appdynamics
+	./custom-otelcol/collector/receiver/ciscoaci
+	./custom-otelcol/collector/receiver/ciscointersight
+	./custom-otelcol/collector/shared/contextdb
+	./custom-otelcol/collector/shared/expressions
+	./custom-otelcol/collector/shared/jsonscraper
+	./custom-otelcol/build
+)
