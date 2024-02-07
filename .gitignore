@@ -2,6 +2,7 @@
 local/**
 thousand-eyes/**
 custom-otelcol/config.yaml
+custom-otelcol/build
 custom-otelcol/conf/intersightPrivateKey.txt
 custom-otelcol/build/custom-otelcol
 custom-otelcol/build/custom-otelcol
